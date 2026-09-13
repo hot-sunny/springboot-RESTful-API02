@@ -1,0 +1,150 @@
+================================================================================
+>>>[스프링 부트] RESTful API 서버 만들기 #2   --[url] https://www.youtube.com/watch?v=c5EpPjvgO0I&t=3s
+--------------------------------------------------------------------------------
+[참고1] RESTful API 서버 구조
+
+                              [Spring Boot 애플리케이션]
+                              [컨트롤러]            [리파지토리]
+                    ------->  회원 컨트롤러   -----> 회원 리파지토리   -----------
+                    |         /members               findAll()                   |
+REST Client   ------|         /members/100           findById(100)               |-------> 데이터베이스
+(Postman)           |                                                            |         회원 테이블
+                    ------->  게시글 컨트롤러 -----> 게시글 리파지토리 -----------         게시글 테이블
+                              /articles              findAll()
+                              /articles/100          findById(100)
+
+
+(1) 애플리케이션 계층 구조 #1
+
+                 [Spring Boot 애플리케이션]
+                 [표현계층]               [서비스 계층]                [영속성 계층]
+                 Presentation Layer       Service Layer                Persistence Layer
+                                   JPA                                                          JDBC
+Client ------>   POST /orders   --------> placeOrder()              |---->  회원 리파지토리   ----|     [데이터베이스]
+        http     get               DTO    (1) 회원 포인트 적립 -----|        - findById()         |--->  회원 테이블
+                 post              객체   (2) 상품 재고 차감   -----|        - save()             |--->  상품 테이블
+                 put                      (3) 결제 시스템 연동      |----> 상품 리파지토리    ----|
+                 delete                         |                Entity      - findById()
+                 patch                          |                객체        - save()
+                                                ▼
+                                          외부 결제 시스템
+
+
+(2) 애플리케이션 계층 구조 #2
+                                                                           http 프로토콜
+  [표현 계층]            @RestController                               <---------- @RequestParam
+  Presentation Layer     @RequestMapping("/members")                           |-- @RequestBody
+                         public class MemberController {                       |-- @PathVariable
+                            @Autowired
+                            private MemberService memberService;        ---------> @ResponseBody
+                            
+                            @GetMapping()                                   JPA
+                            private Member get() {}                    <---------|   
+                         }                                                       |
+                                                                                DTO (Data Transfer Object) 객체
+  [서비스 계층]          @Service                                                |
+  Servicce Layer         public class MemberService() {                <---------|
+                            @Autowired
+                            private MemberRepository memberRepository;
+                         }                                             <---------|
+                                                                                 |
+                                                                               Entity 객체(Model 객체)
+  [영속성 계층]          @Repository  또는 @Mapper                               |
+  Persistence Layer      public interface MemberRepository             <---------|
+                                  extends JpaRepository<Member, Long> {<-----------------------------> [데이터베이스]
+                         }                                                             JDBC             회원 테이블
+
+(3) DTO 객체와 Entity 객체 (예: 회원 가입)
+  - DTO 객체: "표현 계층"과 "서비스 계층" 사이에서 데이터를 주고 받기 위한 객체
+  - Entity 객체(Model객체): "서비스 계층"과 "영속성 계층" 사이에서 데이터를 주고 받기 위한 객체
+  
+  [회원 가입 요청] DTO
+  @Data
+  @Builder
+  public class MemberRequest {
+     private String name;
+     private String email;      ------------>  [회원 엔티티]
+     private Integer age;                      @Entity
+  }                                            @Data, @Builder, @NoArgsConstructor, @AllArgsConstructor
+                                               public class Member {
+                                                  @Id
+                                                  @GeneratedValue(sterategy = ..)  -------------> [데이터베이스]
+  [회원 가입 응답] DTO                            private Long id;                 <-----(id)----   회원 테이블
+  @Data                                           private String name;
+  public class MemberResponse {                   @Column(unique = true)
+     private Loing id;  ***    <----(id)----      private String email;     --[ref] email 을 "로그인 ID"로 사용하는 경우임(why? email 은 unique 하기 때문임) 
+     private String name;                         private Integer age;
+     private String email;                        private String password;  --[ref] 내부적으로 관리하기 위한 필드 추가(암호: password)
+     private Integer age;                         private Boolean enabled;  --[ref] 내부적으로 관리하기 위한 필드 추가(데이터 활성화 여부: enabled)
+  }                                            }
+
+
+(4) 회원 가입 서비스
+[회원 가입]
+public MemberResponse create (MemberRequest memberRequest) {
+   Member member = Member.builder()
+                         .name(memberRequest.getName())
+                         .email(memberRequest.getEmail())
+                         .age(memberRequest.getAge())
+                         .enabled(true).build();
+   memberRepository.save(member);
+   return mapToMemberResponse(member);
+}
+
+[회원 엔티티 객체 -> 회원 응답 객체 변환]
+private MemberResponse mapToMemberResponse(Member member) {
+   return MemberResponse.builder()
+                .id(member.getId())
+                .name(member.getName())
+                .email(member.getEmail())
+                .age(member.getAge())
+                .build();
+}
+
+[복수 회원 일괄 생성]
+@Transactional   <--[ref] "일괄 처리"를 하기 위해 붙이는 어노테이션
+public List<MemberResponse> createBatch(List<MemberRequest> memberRequests) {
+   List<MemberResponse> memberResponseList = memberRequests.stream().map(this::create).toList();    --[ref] memberRequests 에서 stream() 으로 memberRequest 를 하나씩 받아 map() 을 통해 create 함수(위에 정의된 사용자함수)와 매핑하여 하나씩 처리하고 return 된 memberResponse 를 toList() 로 반환함
+   return memberResponseList;
+}
+
+
+**[중요][일괄처리]
+@Transactional 을 붙이지 않은 경우 처리: 메서드 처리 중 에러(email 중복)가 발생하면, 그 이전에 정상 처리된 부분까지만 저장되고 에러 발생한 지점에서 멈춤.
+@Transactional 을 붙인 경우 처리: 메서드 처리 중 에러(email 중복)가 발생하면, 그 이전에 정상 처리된 모든 트랜젝션이 함께 rollback 처리됨. (all or nothing)
+
+@Transactional 어노테이션: "일괄 처리" 어노테이션으로 메서드 또는 클래스 에 붙일 수 있음
+  - 메서드: 메서드에서의 처리를 하나의 Transaction 일괄처리로 묶어서 처리함. 
+            즉, 중간에 에러가 발생하는 경우는 앞에서 처리된 모든 트랜젝션이 전부 함께 rollback 처리됨.
+  - 클래스: 클래스 내에 정의된 모든 메서드는 @Transactional (일괄처리) 하게 처리됨
+
+-------------------------------------------------------
+entity - Member.java
+repository - MemberRepository.java
+service - MemberSerivce.java
+controller - MemberController.java
+
+
+--[테스트-Postman]---
+GET  localhost:8080/members
+
+
+--[테스트-Postman]---  
+--@Transactional 을 붙인 경우: 김영희 email을 이전에 입력한 장보고 메일주소와 같게 입력함.(트랜젝션 전체가 rollback 처리됨)
+--@Transactioanl 안 붙인 경우: 김영희 email을 이전에 입력한 장보고 메일주소와 같게 입력함.(김영희 건만 에러 발생으로 rollback 처리되고, 김철수는 정상적으로 테이블에 생성됨)
+POST  localhost:8080/members
+
+[
+    {
+        "name": "김철수",
+        "email": "chulsuKim@korea.com",
+        "age": 11
+    },
+        {
+        "name": "김영희",
+        "email": "bogoJang@korea.com",
+        "age": 12
+    }
+]
+
+
